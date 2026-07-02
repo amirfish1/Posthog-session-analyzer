@@ -1,0 +1,8 @@
+.env.local
+.env
+posthog-session-*.json
+posthog-session-*.timeline.md
+tmp-session-*.json
+tmp-session-*.md
+node_modules/
+.DS_Store

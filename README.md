@@ -1,5 +1,7 @@
 # PostHog Session Replay Analyzer & Diagnostics Dashboard
 
+![Dashboard Preview](dashboard-preview.png)
+
 A set of lightweight, zero-dependency Node.js tools to download, decompress, parse, and analyze raw PostHog session recording snapshot replays (which are recorded using `rrweb` layout) into structured, readable user interaction timelines. 
 
 It includes a beautiful, local, developer diagnostics dashboard interface to query recent sessions and perform AI-driven UX analysis in one click.

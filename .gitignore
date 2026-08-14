@@ -6,3 +6,4 @@ tmp-session-*.json
 tmp-session-*.md
 node_modules/
 .DS_Store
+env.local

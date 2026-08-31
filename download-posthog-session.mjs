@@ -75,6 +75,14 @@ async function retryAfterSeconds(res, bodyText) {
   return 15;
 }
 
+// PostHog also returns transient 5xx ("Queries are a little too busy right
+// now...") during busy hours, with no Retry-After header. These were thrown
+// immediately (unlike 429s, which already retry above) — one busy-hour 503
+// dropped a session's timeline from the digest with no retry at all. Same
+// fixed backoff as the no-header 429 fallback.
+const RETRYABLE_5XX = new Set([502, 503, 504]);
+const FIXED_BACKOFF_SEC = 15;
+
 async function fetchWithRetry(url, parse) {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     const res = await fetch(url, {
@@ -88,6 +96,15 @@ async function fetchWithRetry(url, parse) {
       }
       console.warn(`  Throttled (429) — waiting ${waitSec}s before retry ${attempt + 1}/${MAX_RETRIES}...`);
       await sleep(waitSec * 1000);
+      continue;
+    }
+    if (RETRYABLE_5XX.has(res.status)) {
+      const bodyText = await res.text();
+      if (attempt === MAX_RETRIES) {
+        throw new Error(`API returned HTTP ${res.status} after ${MAX_RETRIES} attempts: ${bodyText}`);
+      }
+      console.warn(`  Server busy (${res.status}) — waiting ${FIXED_BACKOFF_SEC}s before retry ${attempt + 1}/${MAX_RETRIES}...`);
+      await sleep(FIXED_BACKOFF_SEC * 1000);
       continue;
     }
     if (!res.ok) {

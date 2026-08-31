@@ -53,24 +53,56 @@ const apiKey = apiKeyMatch[1];
 const projectId = 334176; // Scoped project ID for BookYourMat
 const host = 'https://us.posthog.com';
 
-async function requestJson(url) {
-  const res = await fetch(url, {
-    headers: { 'Authorization': `Bearer ${apiKey}` }
-  });
-  if (!res.ok) {
-    throw new Error(`API returned HTTP ${res.status}: ${await res.text()}`);
+const MAX_RETRIES = 5;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// PostHog throttles this endpoint; DRF's 429 response carries a `Retry-After`
+// header in seconds (and repeats the number in the body, e.g. "Request was
+// throttled. Expected available in 15 seconds."). Batches were previously
+// fired back-to-back regardless of that hint, so once a session hit one 429
+// every remaining batch in the same run failed too — 9 of 12 sessions in one
+// digest came back as "(download/parse failed: ... 429 ...)" with no
+// timeline. Honor the hint (falling back to a fixed delay if it's absent)
+// and retry before giving up.
+async function retryAfterSeconds(res, bodyText) {
+  const header = res.headers.get('retry-after');
+  if (header && !Number.isNaN(Number(header))) return Number(header);
+  const match = bodyText.match(/available in (\d+(?:\.\d+)?) seconds?/i);
+  if (match) return Number(match[1]);
+  return 15;
+}
+
+async function fetchWithRetry(url, parse) {
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const res = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${apiKey}` }
+    });
+    if (res.status === 429) {
+      const bodyText = await res.text();
+      const waitSec = await retryAfterSeconds(res, bodyText);
+      if (attempt === MAX_RETRIES) {
+        throw new Error(`API returned HTTP 429 after ${MAX_RETRIES} attempts: ${bodyText}`);
+      }
+      console.warn(`  Throttled (429) — waiting ${waitSec}s before retry ${attempt + 1}/${MAX_RETRIES}...`);
+      await sleep(waitSec * 1000);
+      continue;
+    }
+    if (!res.ok) {
+      throw new Error(`API returned HTTP ${res.status}: ${await res.text()}`);
+    }
+    return parse(res);
   }
-  return res.json();
+}
+
+async function requestJson(url) {
+  return fetchWithRetry(url, (res) => res.json());
 }
 
 async function requestText(url) {
-  const res = await fetch(url, {
-    headers: { 'Authorization': `Bearer ${apiKey}` }
-  });
-  if (!res.ok) {
-    throw new Error(`API returned HTTP ${res.status}: ${await res.text()}`);
-  }
-  return res.text();
+  return fetchWithRetry(url, (res) => res.text());
 }
 
 async function main() {

@@ -65,6 +65,27 @@ console.log(`Processing ${fileData.snapshots.length} player events...`);
 
 const timeline = [];
 
+/**
+ * PostHog emits every network request TWICE: once as the captured request
+ * (carrying `method` and the request/response headers) and once as a bare
+ * PerformanceResourceTiming replayed out of the browser's buffer, flagged
+ * `isInitial: true` and carrying NO method. Both describe the same request —
+ * identical `startTime`, `duration` and `responseStatus`, differing only in
+ * `timeOrigin`/`timestamp`.
+ *
+ * Emitting both used to do two kinds of damage in the report:
+ *  - the method-less copy fell through `r.method || 'GET'` and rendered a
+ *    second, invented line with the WRONG VERB. A single failing
+ *    `POST /api/.../preview` printed as both a POST 500 and a GET 500, and the
+ *    twice-daily studio digest filed that phantom GET as a real broken
+ *    endpoint (BECKY-1425, 2026-09-07 — the route exports no GET at all).
+ *  - every request's `(xN)` occurrence count was doubled.
+ *
+ * So key each request on its identity and keep the FIRST copy seen, which is
+ * the captured one that actually knows the verb.
+ */
+const seenNetworkEntries = new Set();
+
 fileData.snapshots.forEach(s => {
   const ts = s.timestamp;
   if (!ts) return;
@@ -108,11 +129,20 @@ fileData.snapshots.forEach(s => {
       const isTracker = name.includes('posthog') || name.includes('google-analytics') || name.includes('facebook.com') || name.includes('hotjar') || name.includes('doubleclick') || name.includes('google.com/pagead');
       
       if (!isStatic && !isTracker) {
+        // See seenNetworkEntries above: the same request arrives twice and only
+        // one copy knows its method.
+        const identity = `${name}|${r.startTime}|${r.duration}|${r.responseStatus}`;
+        if (seenNetworkEntries.has(identity)) return;
+        seenNetworkEntries.add(identity);
+
         timeline.push({
           ts,
           type: 'API',
           url: name,
-          method: r.method || 'GET',
+          // Only default to GET when the entry is one the browser never had a
+          // method for (navigations, scripts, iframes). Never invent a verb for
+          // a fetch/XHR — a wrong verb reads as a different endpoint.
+          method: r.method || (/^(fetch|xmlhttprequest)$/i.test(r.initiatorType || '') ? '(method not captured)' : 'GET'),
           status: r.responseStatus
         });
       }

@@ -13,7 +13,7 @@ It includes a beautiful, local, developer diagnostics dashboard interface to que
 * **Batch Retrieval (Bypasses API Limits):** PostHog's Snapshot API restricts requests to at most 20 snapshot blobs in a single fetch. The downloader automatically chunks your recording fetch queries into batches and merges them.
 * **High-Fidelity Parser:** Reconstructs the `rrweb` DOM actions. Extracts clean timelines tracking page views, clicks, text input values (omitting hidden characters/inputs), key API queries called, and React/console errors.
 * **Diagnostics Dashboard:** A local-running developer portal served via a zero-dependency HTTP server (port 3099) styled with dark-mode glassmorphic aesthetics.
-* **AI Report Synthesis:** If configured, the dashboard automatically pipes the parsed sequential log into OpenAI's `gpt-4o-mini` to write a structured, senior-level UX onboarding analysis report in real-time.
+* **AI Report Synthesis:** If configured, the dashboard automatically pipes the parsed sequential log into Gemini (`gemini-2.5-flash`) or OpenAI's `gpt-4o-mini` to write a structured, senior-level UX onboarding analysis report in real-time. Gemini is used when `GEMINI_API_KEY` is set; otherwise it falls back to OpenAI, then to the raw timeline.
 
 ---
 
@@ -45,6 +45,10 @@ No external npm dependencies are required. All scripts run on **native Node.js (
    ```env
    # PostHog personal API key (found under Account Settings > Personal API Keys)
    POSTHOG_PERSONAL_API_KEY=phx_your_posthog_personal_key
+   
+   # Optional: Gemini API Key for generating high-level AI onboarding reports.
+   # Takes precedence over OPENAI_API_KEY when both are set.
+   GEMINI_API_KEY=your_gemini_api_key
    
    # Optional: OpenAI API Key for generating high-level AI onboarding reports
    OPENAI_API_KEY=sk-proj-your_openai_api_key

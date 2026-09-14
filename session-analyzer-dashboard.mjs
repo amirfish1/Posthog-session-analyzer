@@ -50,14 +50,18 @@ function saveProjectId(id) {
   fs.writeFileSync(envPath, updated);
 }
 
-// Get OpenAI key if available
+// Get Gemini/OpenAI keys if available (Gemini takes precedence when both are set)
+const geminiKeyMatch = envContent.match(/GEMINI_API_KEY\s*=\s*([^\s#]+)/);
+const geminiApiKey = geminiKeyMatch ? geminiKeyMatch[1] : null;
 const openaiKeyMatch = envContent.match(/OPENAI_API_KEY\s*=\s*([^\s#]+)/);
 const openaiApiKey = openaiKeyMatch ? openaiKeyMatch[1] : null;
 
-if (openaiApiKey) {
-  console.log('OpenAI API Key detected. Onboarding reports will be synthesized using LLM analysis.');
+if (geminiApiKey) {
+  console.log('Gemini API Key detected. Onboarding reports will be synthesized using Gemini.');
+} else if (openaiApiKey) {
+  console.log('OpenAI API Key detected. Onboarding reports will be synthesized using OpenAI.');
 } else {
-  console.log('No OpenAI API Key detected. Reports will show the raw parsed event timeline.');
+  console.log('No Gemini or OpenAI API Key detected. Reports will show the raw parsed event timeline.');
 }
 
 async function requestJson(url) {
@@ -144,16 +148,8 @@ async function downloadSessionData(sessionId) {
   };
 }
 
-// Calls OpenAI to synthesize the report
-async function synthesizeReport(rawMarkdown, userEmail) {
-  if (!openaiApiKey) {
-    return rawMarkdown;
-  }
-  
-  console.log(`[Dashboard] Querying OpenAI (gpt-4o-mini) to synthesize timeline report for ${userEmail}...`);
-  const url = 'https://api.openai.com/v1/chat/completions';
-  
-  const prompt = `You are a Senior Product Analyst and UX Researcher for BookYourMat, a Pilates studio scheduling & payment platform.
+function buildAnalysisPrompt(rawMarkdown) {
+  return `You are a Senior Product Analyst and UX Researcher for BookYourMat, a Pilates studio scheduling & payment platform.
 Your task is to analyze the following raw user session timeline log and write a beautiful, highly structured UX Analysis Report in Markdown.
 
 The report should look clean, professional, and be extremely readable, focusing on key actions, friction points, configurations, and clear recommendations.
@@ -162,6 +158,37 @@ Raw Session Timeline Log:
 ${rawMarkdown}
 
 Please output the UX Analysis Report in Markdown. Use styled alert quotes if needed. Start directly with '# Onboarding Analysis...'. Do not wrap the output in raw markdown block ticks.`;
+}
+
+// Calls Gemini to synthesize the report
+async function synthesizeWithGemini(rawMarkdown, userEmail) {
+  console.log(`[Dashboard] Querying Gemini (gemini-2.5-flash) to synthesize timeline report for ${userEmail}...`);
+  const model = 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: buildAnalysisPrompt(rawMarkdown) }] }],
+      generationConfig: { temperature: 0.2 }
+    })
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error('[Dashboard] Gemini API failed:', errText);
+    return rawMarkdown + `\n\n*(Note: LLM synthesis failed: ${errText})*`;
+  }
+
+  const data = await res.json();
+  return data.candidates[0].content.parts[0].text;
+}
+
+// Calls OpenAI to synthesize the report
+async function synthesizeWithOpenAI(rawMarkdown, userEmail) {
+  console.log(`[Dashboard] Querying OpenAI (gpt-4o-mini) to synthesize timeline report for ${userEmail}...`);
+  const url = 'https://api.openai.com/v1/chat/completions';
 
   const res = await fetch(url, {
     method: 'POST',
@@ -173,20 +200,30 @@ Please output the UX Analysis Report in Markdown. Use styled alert quotes if nee
       model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: 'You are a senior product analyst specializing in UX research and user onboarding conversion.' },
-        { role: 'user', content: prompt }
+        { role: 'user', content: buildAnalysisPrompt(rawMarkdown) }
       ],
       temperature: 0.2
     })
   });
-  
+
   if (!res.ok) {
     const errText = await res.text();
     console.error('[Dashboard] OpenAI API failed:', errText);
     return rawMarkdown + `\n\n*(Note: LLM synthesis failed: ${errText})*`;
   }
-  
+
   const data = await res.json();
   return data.choices[0].message.content;
+}
+
+async function synthesizeReport(rawMarkdown, userEmail) {
+  if (geminiApiKey) {
+    return synthesizeWithGemini(rawMarkdown, userEmail);
+  }
+  if (openaiApiKey) {
+    return synthesizeWithOpenAI(rawMarkdown, userEmail);
+  }
+  return rawMarkdown;
 }
 
 // Start HTTP server

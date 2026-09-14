@@ -36,8 +36,19 @@ if (!apiKeyMatch) {
   process.exit(1);
 }
 const apiKey = apiKeyMatch[1];
-const projectId = 334176;
+const projectIdMatch = envContent.match(/POSTHOG_PROJECT_ID\s*=\s*(\d+)/);
+let projectId = projectIdMatch ? Number(projectIdMatch[1]) : 334176;
 const host = 'https://us.posthog.com';
+
+// Persist the active project ID so it survives dashboard restarts
+function saveProjectId(id) {
+  const current = fs.readFileSync(envPath, 'utf8');
+  const line = `POSTHOG_PROJECT_ID=${id}`;
+  const updated = /POSTHOG_PROJECT_ID\s*=\s*\d+/.test(current)
+    ? current.replace(/POSTHOG_PROJECT_ID\s*=\s*\d+/, line)
+    : `${current.replace(/\n?$/, '\n')}${line}\n`;
+  fs.writeFileSync(envPath, updated);
+}
 
 // Get OpenAI key if available
 const openaiKeyMatch = envContent.match(/OPENAI_API_KEY\s*=\s*([^\s#]+)/);
@@ -196,6 +207,28 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   
+  // API: Update the active PostHog project ID
+  if (url.pathname === '/api/project' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const { projectId: newProjectId } = JSON.parse(body);
+        if (!Number.isInteger(newProjectId) || newProjectId <= 0) {
+          throw new Error('Project ID must be a positive integer');
+        }
+        projectId = newProjectId;
+        saveProjectId(projectId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ projectId }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
   // API: Analyze specific session
   if (url.pathname === '/api/analyze') {
     const sessionId = url.searchParams.get('id');
@@ -415,6 +448,46 @@ const server = http.createServer(async (req, res) => {
       opacity: 0.4;
       cursor: not-allowed;
     }
+    .project-id-form {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+    .project-id-input {
+      background: rgba(0, 0, 0, 0.2);
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      padding: 0.3rem 0.5rem;
+      border-radius: 4px;
+      font-family: inherit;
+      width: 90px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .project-id-input:focus {
+      border-color: var(--bym-punch);
+    }
+    .btn-project-save {
+      background: transparent;
+      color: var(--text-accent);
+      border: 1px solid rgba(254, 110, 0, 0.3);
+      padding: 0.3rem 0.6rem;
+      font-family: inherit;
+      font-weight: 700;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      transition: background-color 0.2s, opacity 0.2s;
+    }
+    .btn-project-save:hover {
+      background: rgba(254, 110, 0, 0.15);
+    }
+    .btn-project-save:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
     .loading-overlay {
       display: none;
       position: absolute;
@@ -560,8 +633,11 @@ const server = http.createServer(async (req, res) => {
     <div class="header-logo">
       BookYourMat <span class="badge">Session Diagnostics</span>
     </div>
-    <div style="font-size: 0.85rem; color: var(--text-secondary)">
-      Connected: <strong style="color: var(--text-primary)">phx_...</strong> (Project 334176)
+    <div class="project-id-form">
+      Connected: <strong style="color: var(--text-primary)">phx_...</strong>
+      Project <input type="number" id="projectIdInput" class="project-id-input" value="${projectId}">
+      <button class="btn-project-save" id="projectIdSaveBtn" onclick="updateProjectId()">Save</button>
+      <span id="projectIdStatus"></span>
     </div>
   </header>
   
@@ -688,6 +764,42 @@ const server = http.createServer(async (req, res) => {
       }
     }
     
+    async function updateProjectId() {
+      const input = document.getElementById('projectIdInput');
+      const btn = document.getElementById('projectIdSaveBtn');
+      const status = document.getElementById('projectIdStatus');
+      const newProjectId = parseInt(input.value, 10);
+
+      if (!Number.isInteger(newProjectId) || newProjectId <= 0) {
+        status.textContent = 'Invalid ID';
+        status.style.color = '#ff2357';
+        return;
+      }
+
+      btn.disabled = true;
+      status.textContent = 'Saving...';
+      status.style.color = 'var(--text-secondary)';
+
+      try {
+        const res = await fetch('/api/project', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectId: newProjectId })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to update project');
+
+        status.textContent = 'Saved';
+        status.style.color = '#00c758';
+        await loadSessions();
+      } catch (err) {
+        status.textContent = err.message;
+        status.style.color = '#ff2357';
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
     document.getElementById('searchInput').addEventListener('input', (e) => {
       const query = e.target.value.toLowerCase();
       const filtered = allSessions.filter(s => {

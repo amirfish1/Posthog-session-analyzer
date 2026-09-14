@@ -162,8 +162,8 @@ Please output the UX Analysis Report in Markdown. Use styled alert quotes if nee
 
 // Calls Gemini to synthesize the report
 async function synthesizeWithGemini(rawMarkdown, userEmail) {
-  console.log(`[Dashboard] Querying Gemini (gemini-3.6-flash) to synthesize timeline report for ${userEmail}...`);
-  const model = 'gemini-3.6-flash';
+  console.log(`[Dashboard] Querying Gemini (gemini-3.8-flash) to synthesize timeline report for ${userEmail}...`);
+  const model = 'gemini-3.8-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`;
 
   const res = await fetch(url, {

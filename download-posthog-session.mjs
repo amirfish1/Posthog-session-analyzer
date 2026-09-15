@@ -50,8 +50,11 @@ if (!apiKeyMatch) {
   process.exit(1);
 }
 const apiKey = apiKeyMatch[1];
-const projectId = 334176; // Scoped project ID for BookYourMat
-const host = 'https://us.posthog.com';
+// Defaults target the BookYourMat project. Other tools (e.g.
+// stramp-posthog-watch) can point the same downloader at a different project
+// via env vars without touching this file's BYM behavior.
+const projectId = Number(process.env.POSTHOG_PROJECT_ID || 334176); // Scoped project ID for BookYourMat
+const host = process.env.POSTHOG_HOST || 'https://us.posthog.com';
 
 const MAX_RETRIES = 5;
 

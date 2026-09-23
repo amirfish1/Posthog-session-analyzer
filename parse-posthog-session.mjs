@@ -86,19 +86,35 @@ const timeline = [];
  */
 const seenNetworkEntries = new Set();
 
+/**
+ * One PostHog recording can contain snapshots from SEVERAL browser tabs —
+ * every snapshot carries a top-level `windowId`, and PostHog merges all
+ * windows of a session into one export. Treating the merged stream as a
+ * single page sequence manufactures phantom navigations: a parked /login
+ * tab's periodic checkpoints interleave with the active dashboard tab and
+ * read as "dashboard -> /login -> dashboard", i.e. a mid-session sign-out
+ * bounce that never happened (BECKY-1701, 2026-09-23 — the dashboard kept
+ * issuing API calls throughout the "/login" segments because it was a
+ * different tab). Every event is therefore tagged with its window and the
+ * timeline is segmented per tab.
+ */
+const NO_WINDOW = 'default';
+
 fileData.snapshots.forEach(s => {
   const ts = s.timestamp;
   if (!ts) return;
-  
+  const win = s.windowId || NO_WINDOW;
+
   // Page view / URL change (Type 4 Meta)
   if (s.type === 4 && s.data && s.data.href) {
     timeline.push({
       ts,
       type: 'NAV',
-      url: s.data.href
+      url: s.data.href,
+      win
     });
   }
-  
+
   // URL Changed (Type 5 Custom tag: $url_changed)
   if (s.type === 5 && s.data && (s.data.tag === '$url_changed' || s.data.tag === '$pageview')) {
     let url = '';
@@ -113,7 +129,8 @@ fileData.snapshots.forEach(s => {
       timeline.push({
         ts,
         type: 'NAV',
-        url
+        url,
+        win
       });
     }
   }
@@ -130,8 +147,9 @@ fileData.snapshots.forEach(s => {
       
       if (!isStatic && !isTracker) {
         // See seenNetworkEntries above: the same request arrives twice and only
-        // one copy knows its method.
-        const identity = `${name}|${r.startTime}|${r.duration}|${r.responseStatus}`;
+        // one copy knows its method. The window is part of the identity — two
+        // tabs issuing the same request are two real requests.
+        const identity = `${win}|${name}|${r.startTime}|${r.duration}|${r.responseStatus}`;
         if (seenNetworkEntries.has(identity)) return;
         seenNetworkEntries.add(identity);
 
@@ -139,6 +157,7 @@ fileData.snapshots.forEach(s => {
           ts,
           type: 'API',
           url: name,
+          win,
           // Only default to GET when the entry is one the browser never had a
           // method for (navigations, scripts, iframes). Never invent a verb for
           // a fetch/XHR — a wrong verb reads as a different endpoint.
@@ -156,7 +175,8 @@ fileData.snapshots.forEach(s => {
         ts,
         type: 'INPUT',
         nodeId: s.data.id,
-        text: s.data.text
+        text: s.data.text,
+        win
       });
     }
   }
@@ -166,7 +186,8 @@ fileData.snapshots.forEach(s => {
     timeline.push({
       ts,
       type: 'CLICK',
-      nodeId: s.data.id
+      nodeId: s.data.id,
+      win
     });
   }
 
@@ -178,7 +199,8 @@ fileData.snapshots.forEach(s => {
           ts,
           type: 'CONSOLE',
           level: log.level,
-          message: log.payload.join(' ')
+          message: log.payload.join(' '),
+          win
         });
       }
     });
@@ -188,54 +210,78 @@ fileData.snapshots.forEach(s => {
 // Sort chronologically
 timeline.sort((a, b) => a.ts - b.ts);
 
-// Deduplicate consecutive navigation segments to same URL
+// Deduplicate consecutive navigation segments to same URL — PER WINDOW. A
+// parked tab re-emits its current href on every ~5 min checkpoint; inside its
+// own window those dedupe to one segment instead of looking like the user
+// kept navigating back to it.
 const dedupedNavs = [];
-let lastNavUrl = '';
+const lastNavUrlByWin = new Map();
 timeline.forEach(e => {
   if (e.type === 'NAV') {
     const cleanUrl = e.url.split('?')[0]; // Compare without query parameters to prevent duplicates
-    if (cleanUrl !== lastNavUrl) {
+    if (lastNavUrlByWin.get(e.win) !== cleanUrl) {
       dedupedNavs.push(e);
-      lastNavUrl = cleanUrl;
+      lastNavUrlByWin.set(e.win, cleanUrl);
     }
   }
 });
 
-// Segment events by pageview
+// Segment events by pageview, per window. A segment only absorbs events from
+// its own tab — clicks and API calls in other tabs are parallel activity, not
+// interactions on this page.
+const navsByWin = new Map();
+dedupedNavs.forEach(n => {
+  if (!navsByWin.has(n.win)) navsByWin.set(n.win, []);
+  navsByWin.get(n.win).push(n);
+});
+
 const segments = [];
-for (let i = 0; i < dedupedNavs.length; i++) {
-  const current = dedupedNavs[i];
-  const next = dedupedNavs[i + 1];
-  const startTime = current.ts;
-  const endTime = next ? next.ts : Infinity;
-  
-  const segment = {
-    url: current.url,
-    startTime,
-    endTime,
-    clicks: 0,
-    inputs: {},
-    apiCalls: {},
-    consoleErrors: []
-  };
-  
-  timeline.forEach(e => {
-    if (e.ts >= startTime && e.ts < endTime) {
-      if (e.type === 'CLICK') {
-        segment.clicks++;
-      } else if (e.type === 'INPUT') {
-        segment.inputs[e.nodeId] = e.text;
-      } else if (e.type === 'API') {
-        const key = `${e.method} ${e.url.split('?')[0]} (Status: ${e.status || 'N/A'})`;
-        segment.apiCalls[key] = (segment.apiCalls[key] || 0) + 1;
-      } else if (e.type === 'CONSOLE') {
-        segment.consoleErrors.push(`[${e.level.toUpperCase()}] ${e.message}`);
+navsByWin.forEach((navs, win) => {
+  for (let i = 0; i < navs.length; i++) {
+    const current = navs[i];
+    const next = navs[i + 1];
+    const startTime = current.ts;
+    const endTime = next ? next.ts : Infinity;
+
+    const segment = {
+      url: current.url,
+      startTime,
+      endTime,
+      win,
+      clicks: 0,
+      inputs: {},
+      apiCalls: {},
+      consoleErrors: []
+    };
+
+    timeline.forEach(e => {
+      if (e.win === win && e.ts >= startTime && e.ts < endTime) {
+        if (e.type === 'CLICK') {
+          segment.clicks++;
+        } else if (e.type === 'INPUT') {
+          segment.inputs[e.nodeId] = e.text;
+        } else if (e.type === 'API') {
+          const key = `${e.method} ${e.url.split('?')[0]} (Status: ${e.status || 'N/A'})`;
+          segment.apiCalls[key] = (segment.apiCalls[key] || 0) + 1;
+        } else if (e.type === 'CONSOLE') {
+          segment.consoleErrors.push(`[${e.level.toUpperCase()}] ${e.message}`);
+        }
       }
-    }
-  });
-  
-  segments.push(segment);
-}
+    });
+
+    segments.push(segment);
+  }
+});
+segments.sort((a, b) => a.startTime - b.startTime);
+
+// Label tabs by first activity so a multi-window recording reads as parallel
+// pages, not one user teleporting between them.
+const windowOrder = [];
+segments.forEach(seg => {
+  if (!windowOrder.includes(seg.win)) windowOrder.push(seg.win);
+});
+const windowLabel = new Map(windowOrder.map((w, i) => [w, `Tab ${i + 1}`]));
+const multiWindow = windowOrder.length > 1;
 
 // Generate Markdown report
 let md = `# PostHog Session Onboarding Report
@@ -244,13 +290,19 @@ let md = `# PostHog Session Onboarding Report
 **Location:** ${location}  
 **Environment:** ${device} (${browser} on ${os})  
 **Analyzed Events:** ${fileData.snapshots.length} raw snapshots
-
+${multiWindow ? `
+> **This recording spans ${windowOrder.length} browser tabs.** Every row is one
+> tab's page; rows in different tabs are PARALLEL pages open at the same time,
+> not the user navigating. A tab that sits on one URL for the whole recording
+> (e.g. a parked /login) appears as a single long segment — it is not a
+> bounce back to that page.
+` : ''}
 ---
 
 ## Onboarding Timeline Summary
 
-| Time Spent | Page / URL Path | Clicks | Inputs | API Calls |
-| :--- | :--- | :--- | :--- | :--- |
+| Time Spent | Page / URL Path |${multiWindow ? ' Tab |' : ''} Clicks | Inputs | API Calls |
+| :--- | :--- |${multiWindow ? ' :--- |' : ''} :--- | :--- | :--- |
 `;
 
 segments.forEach(seg => {
@@ -258,8 +310,8 @@ segments.forEach(seg => {
   const urlPath = seg.url.replace(/^https?:\/\/[^\/]+/i, '');
   const apiCount = Object.values(seg.apiCalls).reduce((sum, count) => sum + count, 0);
   const inputCount = Object.keys(seg.inputs).length;
-  
-  md += `| **${durationSec}** | \`${urlPath || '/'}\` | ${seg.clicks} | ${inputCount} | ${apiCount} |\n`;
+
+  md += `| **${durationSec}** | \`${urlPath || '/'}\` |${multiWindow ? ` ${windowLabel.get(seg.win)} |` : ''} ${seg.clicks} | ${inputCount} | ${apiCount} |\n`;
 });
 
 md += `\n---\n\n## Detailed Interaction Flow\n`;
@@ -267,8 +319,8 @@ md += `\n---\n\n## Detailed Interaction Flow\n`;
 segments.forEach(seg => {
   const durationSec = seg.endTime === Infinity ? 'End' : `${Math.round((seg.endTime - seg.startTime) / 1000)}s`;
   const timeString = new Date(seg.startTime).toISOString();
-  
-  md += `\n### 🌐 Page: \`${seg.url}\`  \n`;
+
+  md += `\n### 🌐 Page: \`${seg.url}\`${multiWindow ? ` (${windowLabel.get(seg.win)})` : ''}  \n`;
   md += `* **Time:** \`${timeString}\` (Duration: **${durationSec}**)\n`;
   md += `* **Clicks:** ${seg.clicks} interactions  \n`;
   

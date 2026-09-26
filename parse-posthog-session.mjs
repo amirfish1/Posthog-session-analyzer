@@ -162,7 +162,13 @@ fileData.snapshots.forEach(s => {
           // method for (navigations, scripts, iframes). Never invent a verb for
           // a fetch/XHR — a wrong verb reads as a different endpoint.
           method: r.method || (/^(fetch|xmlhttprequest)$/i.test(r.initiatorType || '') ? '(method not captured)' : 'GET'),
-          status: r.responseStatus
+          status: r.responseStatus,
+          // The network plugin emits a request-start record at fetch time even
+          // when no response ever arrives (dead connection, hang, abort) — such
+          // records lack responseEnd/duration. Distinguish them from a captured
+          // response: "never completed" is client/transport failure evidence,
+          // not a silent server error (BECKY-1821).
+          responded: r.responseEnd != null || r.duration != null,
         });
       }
     });
@@ -261,7 +267,12 @@ navsByWin.forEach((navs, win) => {
         } else if (e.type === 'INPUT') {
           segment.inputs[e.nodeId] = e.text;
         } else if (e.type === 'API') {
-          const key = `${e.method} ${e.url.split('?')[0]} (Status: ${e.status || 'N/A'})`;
+          const statusLabel = e.status != null
+            ? String(e.status)
+            : e.responded === false
+              ? 'no response captured — request never completed'
+              : 'N/A';
+          const key = `${e.method} ${e.url.split('?')[0]} (Status: ${statusLabel})`;
           segment.apiCalls[key] = (segment.apiCalls[key] || 0) + 1;
         } else if (e.type === 'CONSOLE') {
           segment.consoleErrors.push(`[${e.level.toUpperCase()}] ${e.message}`);

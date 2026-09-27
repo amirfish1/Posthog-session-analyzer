@@ -13,6 +13,40 @@
 import fs from 'fs';
 import path from 'path';
 
+/**
+ * PostHog records a clicked element twice as source-5 "input" events: once as a
+ * JSON blob ({classList, imageUrl, innerText, tag, ...}) carrying the element's
+ * REAL text, and once as a flattened copy with every digit run replaced by "0"
+ * ("50 min / $80" -> "0 min$0"). The blob's innerText sat past the 500-char
+ * display cut behind classList/imageUrl, so only the masked twin was readable
+ * and the digest reported class cards rendering "0 min · $0" (BECKY-1826).
+ * Lead with innerText, and drop the masked twin when its blob is present.
+ */
+export function readableInputText(text) {
+  if (typeof text !== 'string' || !text.trimStart().startsWith('{')) return text;
+  try {
+    const o = JSON.parse(text);
+    if (o && typeof o.innerText === 'string') {
+      const label = o.innerText.split('\n').map((l) => l.trim()).filter(Boolean).join(' / ');
+      return `<${o.tag || 'element'}> ${label}`;
+    }
+  } catch {}
+  return text;
+}
+
+const maskDigits = (t) => t.replace(/\s+/g, '').replace(/\d+/g, '0');
+
+export function isDigitMaskedTwin(e, timeline) {
+  if (!e.rawText || e.rawText.trimStart().startsWith('{')) return false;
+  const masked = e.rawText.replace(/\s+/g, '');
+  return timeline.some((o) =>
+    o !== e && o.type === 'INPUT' && o.win === e.win && Math.abs(o.ts - e.ts) <= 50 &&
+    o.rawText && o.rawText.trimStart().startsWith('{') &&
+    (() => { try { const j = JSON.parse(o.rawText); return typeof j.innerText === 'string' && maskDigits(j.innerText) === masked && maskDigits(j.innerText) !== j.innerText.replace(/\s+/g, ''); } catch { return false; } })(),
+  );
+}
+
+
 // Parse command line arguments
 const args = process.argv.slice(2);
 if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
@@ -181,7 +215,8 @@ fileData.snapshots.forEach(s => {
         ts,
         type: 'INPUT',
         nodeId: s.data.id,
-        text: s.data.text,
+        text: readableInputText(s.data.text),
+        rawText: s.data.text,
         win
       });
     }
@@ -265,6 +300,7 @@ navsByWin.forEach((navs, win) => {
         if (e.type === 'CLICK') {
           segment.clicks++;
         } else if (e.type === 'INPUT') {
+          if (isDigitMaskedTwin(e, timeline)) return;
           segment.inputs[e.nodeId] = e.text;
         } else if (e.type === 'API') {
           const statusLabel = e.status != null

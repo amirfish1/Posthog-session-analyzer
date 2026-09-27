@@ -200,8 +200,11 @@ fileData.snapshots.forEach(s => {
           // The network plugin emits a request-start record at fetch time even
           // when no response ever arrives (dead connection, hang, abort) — such
           // records lack responseEnd/duration. Distinguish them from a captured
-          // response: "never completed" is client/transport failure evidence,
-          // not a silent server error (BECKY-1821).
+          // response. A missing response is NOT proof the request failed: the
+          // recorder also drops responses that did arrive (a Mobile Safari
+          // inbox poll logged 22 start-only records while Vercel served every
+          // one 200, BECKY-1827). It is a lead to confirm server-side — for a
+          // write, the row's updated_at (BECKY-1821); for a read, request logs.
           responded: r.responseEnd != null || r.duration != null,
         });
       }
@@ -306,7 +309,7 @@ navsByWin.forEach((navs, win) => {
           const statusLabel = e.status != null
             ? String(e.status)
             : e.responded === false
-              ? 'no response captured — request never completed'
+              ? 'no response captured — recorder saw only the request start; confirm server-side before calling it failed'
               : 'N/A';
           const key = `${e.method} ${e.url.split('?')[0]} (Status: ${statusLabel})`;
           segment.apiCalls[key] = (segment.apiCalls[key] || 0) + 1;

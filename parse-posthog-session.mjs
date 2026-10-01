@@ -134,6 +134,27 @@ const seenNetworkEntries = new Set();
  */
 const NO_WINDOW = 'default';
 
+/**
+ * When the recorder starts it replays the tab's whole performance buffer as
+ * `isInitial` entries — including requests made long BEFORE this recording,
+ * all stamped with the recording's own snapshot time. A Mobile Safari tab kept
+ * open for days carried a 400 from a swap attempt into a later session, and
+ * the digest reported it as happening "9:05 AM, on a screen she had been
+ * working for several minutes" (BECKY-1892 — the entry's own timing said
+ * three days earlier). Mark those entries so nobody places them in-session.
+ * Safari pauses this clock while a tab sleeps, so the computed time is only a
+ * lower bound — "earlier than this recording", not an exact moment.
+ */
+const recordingStartTs = fileData.snapshots.reduce(
+  (min, s) => (s.timestamp && s.timestamp < min ? s.timestamp : min),
+  Infinity,
+);
+function preRecordingAt(r) {
+  if (!r.isInitial) return null;
+  const at = r.timeOrigin != null && r.startTime != null ? r.timeOrigin + r.startTime : r.timestamp;
+  return Number.isFinite(at) && at < recordingStartTs - 60_000 ? at : null;
+}
+
 fileData.snapshots.forEach(s => {
   const ts = s.timestamp;
   if (!ts) return;
@@ -206,6 +227,7 @@ fileData.snapshots.forEach(s => {
           // one 200, BECKY-1827). It is a lead to confirm server-side — for a
           // write, the row's updated_at (BECKY-1821); for a read, request logs.
           responded: r.responseEnd != null || r.duration != null,
+          preRecordingAt: preRecordingAt(r),
         });
       }
     });
@@ -311,7 +333,10 @@ navsByWin.forEach((navs, win) => {
             : e.responded === false
               ? 'no response captured — recorder saw only the request start; confirm server-side before calling it failed'
               : 'N/A';
-          const key = `${e.method} ${e.url.split('?')[0]} (Status: ${statusLabel})`;
+          const before = e.preRecordingAt != null
+            ? ` [BEFORE THIS RECORDING — replayed from the page's buffer; browser timing says ${new Date(e.preRecordingAt).toISOString()} or earlier, not during this session]`
+            : '';
+          const key = `${e.method} ${e.url.split('?')[0]} (Status: ${statusLabel})${before}`;
           segment.apiCalls[key] = (segment.apiCalls[key] || 0) + 1;
         } else if (e.type === 'CONSOLE') {
           segment.consoleErrors.push(`[${e.level.toUpperCase()}] ${e.message}`);

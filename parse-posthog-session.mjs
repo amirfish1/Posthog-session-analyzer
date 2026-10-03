@@ -12,6 +12,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 
 /**
  * PostHog records a clicked element twice as source-5 "input" events: once as a
@@ -44,6 +45,69 @@ export function isDigitMaskedTwin(e, timeline) {
     o.rawText && o.rawText.trimStart().startsWith('{') &&
     (() => { try { const j = JSON.parse(o.rawText); return typeof j.innerText === 'string' && maskDigits(j.innerText) === masked && maskDigits(j.innerText) !== j.innerText.replace(/\s+/g, ''); } catch { return false; } })(),
   );
+}
+
+/**
+ * rrweb mutation payloads (`adds`, `texts`, `attributes`) arrive from PostHog
+ * as gzip blobs packed into latin-1 strings, not arrays. Without unpacking
+ * them, nothing that renders AFTER page load — a modal, a checkout step, an
+ * inline form — is visible in the timeline: clicks inside it count as bare
+ * numbers, and the digest concluded a client's checkout waiver "never came
+ * up" when the recording shows it rendering at once (BECKY-1948: she could
+ * not reach the signature field below the fold).
+ */
+export function unpackMutationField(v) {
+  if (Array.isArray(v)) return v;
+  if (typeof v !== 'string' || !v) return [];
+  try {
+    const out = JSON.parse(zlib.gunzipSync(Buffer.from(v, 'latin1')).toString('utf8'));
+    return Array.isArray(out) ? out : [];
+  } catch {
+    return [];
+  }
+}
+
+const LABEL_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'button', 'label']);
+
+/**
+ * Headings, buttons and form labels inside newly added DOM — enough to say
+ * which dialog/step the user was looking at, without dumping body copy.
+ */
+export function shownUiLabels(adds) {
+  // rrweb flattens an inserted subtree: each descendant is its own add entry
+  // pointing at its parent, so rebuild the tree before reading any text.
+  const nodes = new Map();
+  const kids = new Map();
+  const link = (pid, n) => {
+    if (pid == null) return;
+    if (!kids.has(pid)) kids.set(pid, []);
+    kids.get(pid).push(n.id);
+  };
+  const register = (n, pid) => {
+    if (!n || typeof n !== 'object' || n.id == null) return;
+    nodes.set(n.id, n);
+    link(pid, n);
+    (n.childNodes || []).forEach((c) => register(c, n.id));
+  };
+  for (const a of unpackMutationField(adds)) register(a?.node, a?.parentId);
+  const textOf = (id, depth = 0) => {
+    const n = nodes.get(id);
+    if (!n || depth > 12) return '';
+    if (n.type === 3) return n.textContent || '';
+    return (kids.get(id) || []).map((c) => textOf(c, depth + 1)).join(' ');
+  };
+  const labels = [];
+  for (const n of nodes.values()) {
+    if (n.type !== 2) continue;
+    const tag = String(n.tagName).toLowerCase();
+    if (LABEL_TAGS.has(tag)) {
+      const t = textOf(n.id).replace(/\s+/g, ' ').trim();
+      if (t) labels.push(t.length > 80 ? t.slice(0, 80) + '…' : t);
+    } else if (tag === 'input' && n.attributes?.placeholder) {
+      labels.push(`[field: ${n.attributes.placeholder}]`);
+    }
+  }
+  return [...new Set(labels)];
 }
 
 
@@ -247,6 +311,12 @@ fileData.snapshots.forEach(s => {
     }
   }
   
+  // UI rendered after load (Type 3 source 0 mutation) — see shownUiLabels.
+  if (s.type === 3 && s.data && s.data.source === 0 && s.data.adds) {
+    const labels = shownUiLabels(s.data.adds);
+    if (labels.length) timeline.push({ ts, type: 'SHOWN', labels, win });
+  }
+
   // Clicks (Type 3 source 2 type 2)
   if (s.type === 3 && s.data && s.data.source === 2 && s.data.type === 2) {
     timeline.push({
@@ -317,7 +387,8 @@ navsByWin.forEach((navs, win) => {
       clicks: 0,
       inputs: {},
       apiCalls: {},
-      consoleErrors: []
+      consoleErrors: [],
+      shown: []
     };
 
     timeline.forEach(e => {
@@ -338,6 +409,8 @@ navsByWin.forEach((navs, win) => {
             : '';
           const key = `${e.method} ${e.url.split('?')[0]} (Status: ${statusLabel})${before}`;
           segment.apiCalls[key] = (segment.apiCalls[key] || 0) + 1;
+        } else if (e.type === 'SHOWN') {
+          segment.shown.push(e);
         } else if (e.type === 'CONSOLE') {
           segment.consoleErrors.push(`[${e.level.toUpperCase()}] ${e.message}`);
         }
@@ -410,6 +483,24 @@ segments.forEach(seg => {
     });
   }
   
+  // UI that rendered after load: dialogs, checkout steps, inline forms.
+  // Labels already reported earlier in the segment are skipped, so a list
+  // that re-renders on every poll does not drown the steps that matter.
+  if (seg.shown.length > 0) {
+    const seen = new Set();
+    const lines = [];
+    seg.shown.forEach(e => {
+      const fresh = e.labels.filter(l => !seen.has(l));
+      fresh.forEach(l => seen.add(l));
+      if (fresh.length) lines.push(`\`${new Date(e.ts).toISOString().slice(11, 19)}Z\` ${fresh.slice(0, 12).join(' · ')}`);
+    });
+    if (lines.length) {
+      md += `* **UI that appeared after load (headings, buttons, fields):**\n`;
+      lines.slice(0, 25).forEach(l => { md += `  * ${l}\n`; });
+      if (lines.length > 25) md += `  * *...and ${lines.length - 25} more*\n`;
+    }
+  }
+
   // Log unique API calls
   const apiKeys = Object.keys(seg.apiCalls);
   if (apiKeys.length > 0) {

@@ -1,0 +1,70 @@
+{
+  "type": 3,
+  "timestamp": 1795219263581,
+  "data": {
+    "source": 0,
+    "adds": [
+      {
+        "parentId": -10,
+        "nextId": null,
+        "node": {
+          "type": 2,
+          "id": 8265,
+          "tagName": "button",
+          "attributes": {},
+          "childNodes": []
+        }
+      },
+      {
+        "parentId": 8265,
+        "nextId": null,
+        "node": {
+          "type": 3,
+          "textContent": "1:50 PM",
+          "rootId": 4177,
+          "id": 8266
+        }
+      },
+      {
+        "parentId": 8265,
+        "nextId": 8266,
+        "node": {
+          "type": 3,
+          "textContent": "\u2013",
+          "rootId": 4177,
+          "id": 8267
+        }
+      },
+      {
+        "parentId": 8265,
+        "nextId": 8267,
+        "node": {
+          "type": 3,
+          "textContent": "1:00 PM",
+          "rootId": 4177,
+          "id": 8268
+        }
+      },
+      {
+        "parentId": 8265,
+        "nextId": 8268,
+        "node": {
+          "type": 3,
+          "textContent": " \u2014 ",
+          "rootId": 4177,
+          "id": 8269
+        }
+      },
+      {
+        "parentId": 8265,
+        "nextId": 8269,
+        "node": {
+          "type": 3,
+          "textContent": "Mon, Nov 23",
+          "rootId": 4177,
+          "id": 8270
+        }
+      }
+    ]
+  }
+}

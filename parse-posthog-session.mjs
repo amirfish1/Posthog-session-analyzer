@@ -69,6 +69,51 @@ export function unpackMutationField(v) {
 
 const LABEL_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'button', 'label']);
 
+function orderSiblings(siblings) {
+  if (siblings.size < 2) return [...siblings.keys()];
+  const before = new Map();
+  const after = new Map();
+  const anchored = new Set();
+  for (const [id, links] of siblings) {
+    const { nextId, previousId } = links ?? {};
+    const hasNext = nextId !== -1 && nextId !== id && siblings.has(nextId);
+    // A reciprocal previousId describes the same relation as its peer's nextId.
+    const hasPrevious = previousId !== -1 && previousId !== id && siblings.has(previousId)
+      && siblings.get(previousId)?.nextId !== id;
+    const anchor = hasNext ? nextId : hasPrevious ? previousId : undefined;
+    if (anchor === undefined) continue;
+    const side = hasNext ? before : after;
+    if (!side.has(anchor)) side.set(anchor, []);
+    side.get(anchor).push(id);
+    anchored.add(id);
+  }
+  if (anchored.size === 0) return [...siblings.keys()];
+
+  // Keep unanchored nodes in serialized/arrival order and emit linked siblings
+  // around their anchor. An explicit stack handles long chains of flat adds.
+  const order = [];
+  const stack = [...siblings.keys()].filter(id => !anchored.has(id)).reverse().map(id => [id, false]);
+  while (stack.length) {
+    const [id, emit] = stack.pop();
+    if (emit) {
+      order.push(id);
+      continue;
+    }
+    for (const child of after.get(id) ?? []) stack.push([child, false]);
+    stack.push([id, true]);
+    const preceding = before.get(id) ?? [];
+    for (let i = preceding.length - 1; i >= 0; i -= 1) stack.push([preceding[i], false]);
+  }
+  // An incomplete or contradictory replay can leave a cycle with no anchor.
+  if (order.length < siblings.size) {
+    const emitted = new Set(order);
+    for (const id of siblings.keys()) {
+      if (!emitted.has(id)) order.push(id);
+    }
+  }
+  return order;
+}
+
 /**
  * Headings, buttons and form labels inside newly added DOM — enough to say
  * which dialog/step the user was looking at, without dumping body copy.
@@ -78,23 +123,23 @@ export function shownUiLabels(adds) {
   // pointing at its parent, so rebuild the tree before reading any text.
   const nodes = new Map();
   const kids = new Map();
-  const link = (pid, n) => {
-    if (pid == null) return;
-    if (!kids.has(pid)) kids.set(pid, []);
-    kids.get(pid).push(n.id);
-  };
-  const register = (n, pid) => {
+  const register = (n, pid, links) => {
     if (!n || typeof n !== 'object' || n.id == null) return;
     nodes.set(n.id, n);
-    link(pid, n);
+    if (pid != null) {
+      if (!kids.has(pid)) kids.set(pid, new Map());
+      kids.get(pid).set(n.id, links);
+    }
     (n.childNodes || []).forEach((c) => register(c, n.id));
   };
-  for (const a of unpackMutationField(adds)) register(a?.node, a?.parentId);
+  for (const a of unpackMutationField(adds)) register(a?.node, a?.parentId, a);
+  const orderedKids = new Map();
+  for (const [pid, siblings] of kids) orderedKids.set(pid, orderSiblings(siblings));
   const textOf = (id, depth = 0) => {
     const n = nodes.get(id);
     if (!n || depth > 12) return '';
     if (n.type === 3) return n.textContent || '';
-    return (kids.get(id) || []).map((c) => textOf(c, depth + 1)).join(' ');
+    return (orderedKids.get(id) || []).map((c) => textOf(c, depth + 1)).join('');
   };
   const labels = [];
   for (const n of nodes.values()) {

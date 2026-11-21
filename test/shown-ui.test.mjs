@@ -47,3 +47,39 @@ test('UI rendered after load (compressed, flattened adds) is listed per segment'
   assert.doesNotMatch(md, /Body copy is not a label/);
   assert.equal(md.match(/Sign the waiver to continue/g).length, 1);
 });
+
+function renderMutation(t, mutation) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ph-mutation-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const input = path.join(dir, 'visit.json');
+  const out = path.join(dir, 'visit.md');
+  const snapshots = [
+    { type: 4, timestamp: mutation.timestamp - 1000, windowId: 'w1', data: { href: 'https://example.test/booking' } },
+    { ...mutation, windowId: 'w1' },
+  ];
+  fs.writeFileSync(input, JSON.stringify({ data: { snapshots } }));
+  execFileSync(process.execPath, [parser, input, out], { stdio: 'ignore' });
+  return fs.readFileSync(out, 'utf8');
+}
+
+test('the recorded booking row follows nextId through right-to-left additions', t => {
+  const fixture = new URL('./fixtures/booked-row-mutation.json', import.meta.url);
+  const mutation = JSON.parse(fs.readFileSync(fixture, 'utf8'));
+  const md = renderMutation(t, mutation);
+  assert.match(md, /Mon, Nov 23 — 1:00 PM–1:50 PM/);
+});
+
+test('previousId positions flat additions among serialized children and missing links fall back to arrival order', t => {
+  const text = (id, textContent) => ({ type: 3, id, textContent });
+  const adds = [
+    { parentId: 1, node: { type: 2, id: 10, tagName: 'button', childNodes: [text(11, 'A '), text(12, 'C ')] } },
+    { parentId: 10, nextId: 22, node: text(13, 'D ') },
+    { parentId: 10, previousId: 11, node: text(14, 'B ') },
+    { parentId: 10, nextId: -1, node: text(15, 'E ') },
+    { parentId: 10, previousId: 999, node: text(16, 'F') },
+    { parentId: 20, node: { type: 2, id: 21, tagName: 'button', childNodes: [text(22, 'Other label')] } },
+  ];
+  const md = renderMutation(t, { type: 3, timestamp: 1790969241000, data: { source: 0, adds: packed(adds) } });
+  assert.match(md, /A B C D E F/);
+  assert.match(md, /Other label/);
+});

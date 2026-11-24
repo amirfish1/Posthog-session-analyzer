@@ -57,6 +57,16 @@ const projectId = Number(process.env.POSTHOG_PROJECT_ID || 334176); // Scoped pr
 const host = process.env.POSTHOG_HOST || 'https://us.posthog.com';
 
 const MAX_RETRIES = 5;
+// A batch caller can hand us its absolute deadline. Interactive downloads
+// retain their existing retry policy when no deadline was supplied.
+const deadline = Number(process.env.POSTHOG_DOWNLOAD_DEADLINE_MS) || Infinity;
+
+class PosthogThrottled extends Error {
+  constructor(retryAt) {
+    super('PostHog 429 throttled');
+    this.retryAt = retryAt;
+  }
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -70,9 +80,14 @@ function sleep(ms) {
 // digest came back as "(download/parse failed: ... 429 ...)" with no
 // timeline. Honor the hint (falling back to a fixed delay if it's absent)
 // and retry before giving up.
-async function retryAfterSeconds(res, bodyText) {
+function retryAfterSeconds(res, bodyText) {
   const header = res.headers.get('retry-after');
-  if (header && !Number.isNaN(Number(header))) return Number(header);
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds;
+    const when = Date.parse(header);
+    if (Number.isFinite(when)) return Math.max(0, (when - Date.now()) / 1000);
+  }
   const match = bodyText.match(/available in (\d+(?:\.\d+)?) seconds?/i);
   if (match) return Number(match[1]);
   return 15;
@@ -93,7 +108,11 @@ async function fetchWithRetry(url, parse) {
     });
     if (res.status === 429) {
       const bodyText = await res.text();
-      const waitSec = await retryAfterSeconds(res, bodyText);
+      const waitSec = retryAfterSeconds(res, bodyText);
+      const retryAt = Date.now() + Math.ceil(waitSec * 1000);
+      if (deadline !== Infinity && (retryAt >= deadline || attempt === MAX_RETRIES)) {
+        throw new PosthogThrottled(retryAt);
+      }
       if (attempt === MAX_RETRIES) {
         throw new Error(`API returned HTTP 429 after ${MAX_RETRIES} attempts: ${bodyText}`);
       }
@@ -218,6 +237,11 @@ async function main() {
     execSync(`node "${parserPath}" "${jsonPath}" "${mdPath}"`, { stdio: 'inherit' });
     
   } catch (error) {
+    if (error instanceof PosthogThrottled) {
+      console.error(`POSTHOG_RETRY_AT_MS=${error.retryAt}`);
+      process.exitCode = 75;
+      return;
+    }
     console.error('\n❌ Execution failed:', error.message);
     process.exit(1);
   }
